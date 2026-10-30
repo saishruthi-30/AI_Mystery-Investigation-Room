@@ -1,4 +1,6 @@
 import express from 'express';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
 import cors from 'cors';
 import helmet from 'helmet';
 import session from 'express-session';
@@ -12,8 +14,16 @@ import { queueGeneration } from './services/generation.js';
 
 export const app = express();
 app.set('trust proxy', 1);
-const configuredClientOrigin = process.env.CLIENT_URL || 'http://localhost:5173';
-const isAllowedOrigin = origin => origin === configuredClientOrigin || (process.env.NODE_ENV !== 'production' && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin));
+const configuredClientOrigin = process.env.CLIENT_URL || process.env.RENDER_EXTERNAL_URL || 'http://localhost:5173';
+const isAllowedOrigin = (origin, req) => {
+  if (origin === configuredClientOrigin) return true;
+  if (process.env.NODE_ENV !== 'production' && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) return true;
+  if (process.env.NODE_ENV === 'production' && req) {
+    try { const parsed = new URL(origin); return parsed.host === req.get('host') && parsed.protocol === `${req.protocol}:`; }
+    catch { return false; }
+  }
+  return false;
+};
 app.use(helmet({ contentSecurityPolicy: { directives: {
   defaultSrc: ["'self'"], styleSrc: ["'self'", 'https://fonts.googleapis.com'],
   fontSrc: ["'self'", 'https://fonts.gstatic.com'], imgSrc: ["'self'", 'data:', 'https:'],
@@ -22,7 +32,7 @@ app.use(helmet({ contentSecurityPolicy: { directives: {
 app.use(cors({ origin: (origin, callback) => callback(null, !origin || isAllowedOrigin(origin)), credentials: true }));
 app.use((req, res, next) => {
   const origin = req.get('origin');
-  if (origin && !isAllowedOrigin(origin) && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return res.status(403).json({ success: false, error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin is not allowed.' } });
+  if (origin && !isAllowedOrigin(origin, req) && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return res.status(403).json({ success: false, error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin is not allowed.' } });
   next();
 });
 app.use(express.json({ limit: '32kb' }));
@@ -123,4 +133,14 @@ app.get('/api/v1/mysteries/:id/result', requireAuth, asyncRoute(async (req, res)
   if (!mystery || !attempt) return sendError(res, 404, 'NOT_FOUND', 'Completed result not found.'); res.json({ success: true, result: safeResult(mystery, attempt) });
 }));
 app.use('/api', (req, res) => sendError(res, 404, 'NOT_FOUND', 'API route not found.'));
+const clientDist = path.resolve(process.cwd(), 'dist');
+if (existsSync(path.join(clientDist, 'index.html'))) {
+  app.use(express.static(clientDist, { index: false, maxAge: '1y', immutable: true, setHeaders(res, filePath) {
+    if (path.basename(filePath) === 'index.html') res.setHeader('Cache-Control', 'no-cache');
+  } }));
+  app.use((req, res, next) => {
+    if (req.method !== 'GET') return next();
+    res.sendFile(path.join(clientDist, 'index.html'), { headers: { 'Cache-Control': 'no-cache' } }, next);
+  });
+}
 app.use(handleError);
